@@ -1,8 +1,8 @@
 use anyhow::Result;
 use clap::Parser;
 use rustjslich::*;
+use std::time::Duration;
 use tracing::{info, warn};
-use tracing_subscriber;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -61,21 +61,145 @@ async fn main() -> Result<()> {
         }
     }
     
-    // Initialize other components
-    let _timing_engine = TimingEngine::new(config.vpn_ping_offset);
-    let _move_selector = MoveSelector::new();
-    let _game_state = GameState::new();
+    // Initialize game manager
+    let game_manager = GameManager::new(engine_manager, config.clone());
     
     info!("✓ All components initialized");
     info!("");
-    info!("🎮 Ready to play!");
-    info!("Note: Full Lichess integration (WebSocket, API) is not yet implemented.");
-    info!("This is a demonstration of the core engine and timing systems.");
+    
+    // Check if we should run with UI
+    if std::env::var("NO_UI").is_ok() {
+        // Run without UI (for testing or headless mode)
+        run_headless(game_manager, config).await?;
+    } else {
+        // Run with Terminal UI
+        run_with_ui(game_manager, config).await?;
+    }
+    
+    Ok(())
+}
+
+async fn run_with_ui(game_manager: GameManager, mut config: Config) -> Result<()> {
+    info!("🎮 Starting with Terminal UI");
+    info!("Use hotkeys to control the bot (see UI for details)");
     info!("");
     
-    // Demo: Test the engine with a position
+    // Initialize terminal UI
+    let mut ui = TerminalUI::new()?;
+    ui.update_from_config(&config);
+    
+    // Main event loop
+    let mut should_quit = false;
+    
+    // Start game manager tasks
+    let lichess_client_ref = game_manager.lichess_client.clone();
+    
+    // Example: Connect to a game (in a real scenario, you'd get this from a challenge or API)
+    // For now, we'll just show the UI and let the user see the interface
+    
+    while !should_quit {
+        // Update UI from current state
+        let state = game_manager.state.read().await;
+        ui.update_from_game(&state);
+        drop(state);
+        
+        ui.update_from_config(&config);
+        
+        // Draw UI
+        ui.draw()?;
+        
+        // Handle input with timeout
+        match ui.handle_input(Duration::from_millis(100))? {
+            UICommand::Quit => {
+                info!("Quit command received");
+                should_quit = true;
+            }
+            UICommand::ToggleAuto => {
+                config.auto_run = !config.auto_run;
+                let mut cfg = game_manager.config.write().await;
+                cfg.auto_run = config.auto_run;
+                info!("Auto mode: {}", config.auto_run);
+            }
+            UICommand::TogglePanic => {
+                config.panic_mode = !config.panic_mode;
+                let mut cfg = game_manager.config.write().await;
+                cfg.panic_mode = config.panic_mode;
+                info!("Panic mode: {}", config.panic_mode);
+            }
+            UICommand::ToggleHuman => {
+                config.human_mode = !config.human_mode;
+                let mut cfg = game_manager.config.write().await;
+                cfg.human_mode = config.human_mode;
+                info!("Human mode: {}", config.human_mode);
+            }
+            UICommand::ToggleVaried => {
+                config.varied_mode = !config.varied_mode;
+                let mut cfg = game_manager.config.write().await;
+                cfg.varied_mode = config.varied_mode;
+                info!("Varied mode: {}", config.varied_mode);
+            }
+            UICommand::CycleEngine => {
+                config.selected_engine = match config.selected_engine {
+                    Engine::Stockfish => Engine::Stockfish8,
+                    Engine::Stockfish8 => Engine::JsChess,
+                    Engine::JsChess => Engine::Tomitank15,
+                    Engine::Tomitank15 => Engine::Tomitank51,
+                    Engine::Tomitank51 => Engine::Stockfish,
+                };
+                let mut cfg = game_manager.config.write().await;
+                cfg.selected_engine = config.selected_engine;
+                info!("Engine: {}", config.selected_engine.as_str());
+            }
+            UICommand::CycleConfig => {
+                config.config_mode = match config.config_mode {
+                    ConfigMode::Fast7_5s => ConfigMode::Normal15s,
+                    ConfigMode::Normal15s => ConfigMode::Slow30s,
+                    ConfigMode::Slow30s => ConfigMode::Fast7_5s,
+                };
+                let mut cfg = game_manager.config.write().await;
+                cfg.config_mode = config.config_mode;
+                let mut timing = game_manager.timing_engine.write().await;
+                timing.set_preset(config.config_mode);
+                info!("Config mode: {}", config.config_mode.as_str());
+            }
+            UICommand::Hint => {
+                info!("Hint requested - processing turn");
+                if let Err(e) = game_manager.process_turn().await {
+                    warn!("Failed to process turn: {}", e);
+                }
+            }
+            UICommand::None => {
+                // Check for lichess events
+                let mut client = lichess_client_ref.write().await;
+                if let Some(event) = client.try_recv_event() {
+                    drop(client);
+                    if let Err(e) = game_manager.handle_event(event).await {
+                        warn!("Failed to handle event: {}", e);
+                    }
+                }
+            }
+        }
+        
+        // Small delay to avoid busy loop
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    
+    ui.cleanup()?;
+    info!("Shutting down...");
+    
+    Ok(())
+}
+
+async fn run_headless(game_manager: GameManager, _config: Config) -> Result<()> {
+    info!("🎮 Running in headless mode");
+    info!("Press Ctrl+C to exit");
+    info!("");
+    
+    // In headless mode, just demonstrate the engine
+    info!("Testing engine with starting position...");
+    let mut engine_manager = game_manager.engine_manager.write().await;
+    
     if let Some(engine) = engine_manager.get_active_engine() {
-        info!("Testing engine with starting position...");
         engine.set_position("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")?;
         
         let search_options = SearchOptions {
@@ -98,8 +222,9 @@ async fn main() -> Result<()> {
     }
     
     info!("");
-    info!("To connect to Lichess, the WebSocket client needs to be implemented.");
-    info!("See src/lichess/ for the planned implementation.");
+    info!("Headless mode demonstration complete.");
+    info!("To connect to Lichess, the full integration needs a game ID.");
+    info!("See SPECIFICATION.md for details on WebSocket integration.");
     
     Ok(())
 }
