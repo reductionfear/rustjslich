@@ -1,0 +1,43 @@
+[package]
+name = "rustjslich"
+version = "1.0.0"
+edition = "2021"
+authors = ["rustjslich contributors"]
+description = "Standalone Rust executable for Lichess chess automation with full feature parity to move.user.js"
+
+[dependencies]
+# Async Runtime
+tokio = { version = "1", features = ["full"] }
+
+# Chess
+chess = "3.2"
+vampirc-uci = "0.11"
+
+# Networking
+reqwest = { version = "0.11", features = ["json"] }
+tokio-tungstenite = "0.21"
+futures-util = "0.3"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# UI (Terminal)
+crossterm = "0.27"
+
+# Utilities
+rand = "0.8"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+thiserror = "1"
+anyhow = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+opt-level = 3

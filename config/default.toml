@@ -1,0 +1,22 @@
+# Configuration for rustjslich
+
+# Engine to use: "stockfish", "stockfish8", "jschess", "tomitank15", "tomitank51"
+selected_engine = "stockfish"
+
+# Timing preset: "7.5s", "15s", "30s"
+config_mode = "15s"
+
+# Feature toggles
+auto_run = false
+show_arrows = true
+piece_select_mode = false
+human_mode = true
+varied_mode = true
+panic_mode = false
+
+# Network lag compensation in milliseconds
+vpn_ping_offset = 0
+
+# Lichess API token (get from https://lichess.org/account/oauth/token)
+# You can also set this via LICHESS_TOKEN environment variable
+# lichess_token = "lip_xxxxxxxxxxxxx"
