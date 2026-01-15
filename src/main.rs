@@ -120,6 +120,13 @@ async fn run_with_ui(game_manager: GameManager, mut config: Config) -> Result<()
         
         ui.update_from_config(&config);
         
+        // Update connection status from bridge
+        let bridge_handle = game_manager.bridge_handle.read().await;
+        if let Some(ref handle) = *bridge_handle {
+            ui.set_connected(handle.is_connected());
+        }
+        drop(bridge_handle);
+        
         // Draw UI
         ui.draw()?;
         

@@ -1,6 +1,8 @@
 use super::protocol::{BrowserMessage, RustMessage};
 use anyhow::{anyhow, Result};
 use futures_util::{SinkExt, StreamExt};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
@@ -10,16 +12,19 @@ pub struct BridgeServer {
     port: u16,
     message_tx: mpsc::UnboundedSender<BrowserMessage>,
     command_rx: mpsc::UnboundedReceiver<RustMessage>,
+    is_connected: Arc<AtomicBool>,
 }
 
 impl BridgeServer {
     pub fn new(port: u16) -> (Self, BridgeHandle) {
         let (message_tx, message_rx) = mpsc::unbounded_channel();
         let (command_tx, command_rx) = mpsc::unbounded_channel();
+        let is_connected = Arc::new(AtomicBool::new(false));
         
         let handle = BridgeHandle {
             message_rx,
             command_tx,
+            is_connected: is_connected.clone(),
         };
         
         (
@@ -27,6 +32,7 @@ impl BridgeServer {
                 port,
                 message_tx,
                 command_rx,
+                is_connected,
             },
             handle,
         )
@@ -45,6 +51,8 @@ impl BridgeServer {
                     info!("Browser extension connected from {}", addr);
                     
                     let message_tx = self.message_tx.clone();
+                    let is_connected = self.is_connected.clone();
+                    
                     // Create a new command channel for this connection
                     let (command_tx, command_rx) = mpsc::unbounded_channel();
                     
@@ -63,9 +71,12 @@ impl BridgeServer {
                     });
                     
                     tokio::spawn(async move {
+                        is_connected.store(true, Ordering::Relaxed);
                         if let Err(e) = handle_connection(stream, message_tx, command_rx).await {
                             error!("Connection error: {}", e);
                         }
+                        is_connected.store(false, Ordering::Relaxed);
+                        info!("Browser extension disconnected");
                     });
                 }
                 Err(e) => {
@@ -153,9 +164,15 @@ async fn handle_connection(
 pub struct BridgeHandle {
     message_rx: mpsc::UnboundedReceiver<BrowserMessage>,
     command_tx: mpsc::UnboundedSender<RustMessage>,
+    is_connected: Arc<AtomicBool>,
 }
 
 impl BridgeHandle {
+    /// Check if a browser extension is currently connected
+    pub fn is_connected(&self) -> bool {
+        self.is_connected.load(Ordering::Relaxed)
+    }
+    
     /// Try to receive a message from the browser (non-blocking)
     pub fn try_recv_message(&mut self) -> Option<BrowserMessage> {
         self.message_rx.try_recv().ok()

@@ -9,10 +9,11 @@ This document details the comprehensive architecture for porting the Lichess che
 | Goal | Status | Description |
 |------|--------|-------------|
 | **Platform Independence** | ✅ | Runs as native executable on Windows, macOS, Linux |
-| **Feature Parity** | ✅ (Core) | Maintains all features from JavaScript implementation |
+| **Feature Parity** | ✅ | Maintains all features from JavaScript implementation |
 | **Performance** | ✅ | Leverages Rust's speed for chess calculations |
 | **Configuration** | ✅ | TOML-based persistent configuration |
-| **External Operation** | 🚧 | WebSocket/API integration (planned) |
+| **External Operation** | ✅ | Browser Bridge WebSocket integration |
+| **Browser Integration** | ✅ | Chrome extension for Lichess.org |
 
 ## Module Breakdown
 
@@ -268,7 +269,119 @@ pub struct VarietyStats {
 }
 ```
 
-### 6. CLI Module (`src/cli.rs`)
+### 6. Browser Bridge Module (`src/bridge/`)
+
+**Purpose**: WebSocket server for bidirectional communication with browser extension
+
+**Architecture**:
+```
+┌─────────────────┐         WebSocket          ┌──────────────────┐
+│ Browser Extension│◄──────────────────────────►│  Rust Backend   │
+│  (content.js)   │         (port 9876)        │  (bridge server) │
+└─────────────────┘                            └──────────────────┘
+        │                                               │
+        │ 1. Game State Updates                         │
+        │    (FEN, moves, turn, clocks)                 │
+        │────────────────────────────────────────────► │
+        │                                               │
+        │                                          2. Process Turn
+        │                                               │
+        │                                          3. Calculate Move
+        │                                               │
+        │ 4. Move Command (UCI)                         │
+        │ ◄─────────────────────────────────────────────│
+        │                                               │
+        │ 5. Execute Move on Board                      │
+```
+
+**Protocol Messages** (`src/bridge/protocol.rs`):
+
+```rust
+// Messages from browser to Rust
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum BrowserMessage {
+    GameState(GameStateMessage),
+    RematchAvailable { game_id: String },
+    RematchAccepted { game_id: String },
+    NewGame { game_id: String },
+}
+
+pub struct GameStateMessage {
+    pub game_id: String,
+    pub fen: String,                    // Starting position
+    pub my_color: Color,                // Player orientation
+    pub is_my_turn: bool,               // Turn indicator
+    pub white_clock_ms: u64,            // White's time in ms
+    pub black_clock_ms: u64,            // Black's time in ms
+    pub moves: Vec<String>,             // Move list (SAN or UCI)
+    pub game_ended: bool,               // Game over flag
+    pub result: Option<String>,         // Game result
+}
+
+// Messages from Rust to browser
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum RustMessage {
+    MakeMove { uci: String },           // Execute move on board
+    AcceptRematch,                      // Click rematch button
+    DeclineRematch,                     // Ignore rematch
+}
+```
+
+**Server Implementation** (`src/bridge/server.rs`):
+
+```rust
+pub struct BridgeServer {
+    port: u16,
+    message_tx: mpsc::UnboundedSender<BrowserMessage>,
+    command_rx: mpsc::UnboundedReceiver<RustMessage>,
+    is_connected: Arc<AtomicBool>,
+}
+
+pub struct BridgeHandle {
+    message_rx: mpsc::UnboundedReceiver<BrowserMessage>,
+    command_tx: mpsc::UnboundedSender<RustMessage>,
+    is_connected: Arc<AtomicBool>,
+}
+```
+
+**Key Features**:
+- **Bidirectional Communication**: Uses `tokio::select!` to handle both incoming and outgoing messages
+- **Automatic Reconnection**: Extension retries with exponential backoff (1s → 30s max)
+- **Connection Status Tracking**: Real-time status visible in Terminal UI
+- **Per-Connection Channels**: Each browser connection gets its own command channel
+- **SAN to UCI Conversion**: Automatically converts Standard Algebraic Notation moves to UCI format
+- **State Change Detection**: Extension only sends updates when game state actually changes
+
+**Message Flow**:
+
+1. **Game State Synchronization**:
+   - Extension monitors Lichess DOM for changes
+   - Extracts move list, clock times, turn info
+   - Sends `GameState` message to Rust app
+   - Rust reconstructs position from move list
+
+2. **Move Calculation**:
+   - Rust processes turn when `is_my_turn=true`
+   - Engine calculates best moves
+   - Move selector applies variation/blunder logic
+   - Human timing adds realistic delay
+
+3. **Move Execution**:
+   - Rust sends `MakeMove` command with UCI move
+   - Extension receives command via WebSocket
+   - Simulates mouse drag-and-drop on board
+   - Move executes on Lichess
+
+**Browser Extension** (`extension/`):
+
+- **background.js**: Manages WebSocket connection, handles reconnection
+- **content.js**: Parses Lichess DOM, executes moves, monitors game state
+- **popup.js**: Shows connection status and controls
+- **manifest.json**: Chrome extension configuration
+
+### 7. CLI Module (`src/cli.rs`)
 
 **Purpose**: Command-line argument parsing
 
@@ -279,7 +392,7 @@ pub struct Args {
     pub token: Option<String>,
     
     #[arg(long, default_value = "stockfish")]
-    pub engine: String,
+    pub engine: String,                  // Custom engine path or "stockfish"
     
     #[arg(long)]
     pub auto: bool,
@@ -295,26 +408,54 @@ pub struct Args {
     
     #[arg(long)]
     pub human_mode: bool,
+    
+    #[arg(long, default_value = "9876")]
+    pub bridge_port: u16,                // WebSocket server port
+    
+    #[arg(long)]
+    pub auto_rematch: bool,
 }
 ```
 
 ## Data Flow
 
 ```
-User → CLI Args → Config → Engine Manager
-                    ↓
-                GameState
-                    ↓
-        ┌──────────┴──────────┐
-        ↓                     ↓
-   Engine Analysis      Timing Engine
-   (Multi-PV)          (Delay Calc)
-        ↓                     ↓
-   Move Selector ────────────→ Selected Move
-   (Varied/Blunder)
-        ↓
-   [Lichess Client - Planned]
+┌────────────────────────────────────────────────────────────────┐
+│                      Browser (Lichess.org)                      │
+│  ┌──────────────┐         ┌────────────┐       ┌─────────┐    │
+│  │  content.js  │────────►│background.js│──────►│ popup.js│    │
+│  │ (DOM Parser) │         │ (WebSocket) │       │ (Status)│    │
+│  └──────────────┘         └────────────┘       └─────────┘    │
+└────────────────────────────────────────────────────────────────┘
+         │                         ▲
+         │ Game State              │ Move Commands
+         │ (JSON/WebSocket)        │ (UCI format)
+         ▼                         │
+┌────────────────────────────────────────────────────────────────┐
+│                    Rust Backend (rustjslich)                    │
+│  ┌───────────┐        ┌─────────────┐       ┌──────────────┐  │
+│  │  Bridge   │───────►│    Game     │──────►│   Engine     │  │
+│  │  Server   │        │   Manager   │       │   Manager    │  │
+│  │  (9876)   │        │             │       │  (Stockfish) │  │
+│  └───────────┘        └─────────────┘       └──────────────┘  │
+│                              │                       │          │
+│                              │                       │          │
+│                        ┌─────▼──────┐       ┌───────▼────┐    │
+│                        │   Timing   │       │    Move    │    │
+│                        │   Engine   │       │  Selector  │    │
+│                        └────────────┘       └────────────┘    │
+└────────────────────────────────────────────────────────────────┘
 ```
+
+**Flow Description**:
+
+1. **Browser → Rust**: Extension parses game state from DOM and sends via WebSocket
+2. **Rust Processing**: Game manager reconstructs position, checks if it's our turn
+3. **Engine Analysis**: Stockfish analyzes position, returns top 4 moves (Multi-PV)
+4. **Move Selection**: Selector applies variety/blunder logic, weights probabilities
+5. **Timing**: Human-like delay calculated based on position and configuration
+6. **Rust → Browser**: Selected move sent back as UCI command
+7. **Move Execution**: Extension simulates drag-and-drop to play move on board
 
 ## Feature Parity Checklist
 
@@ -331,17 +472,24 @@ User → CLI Args → Config → Engine Manager
 | Lag Compensation | `timing.rs` | ✅ Rolling average |
 | Config Persistence | `config.rs` | ✅ TOML file |
 | CLI Arguments | `cli.rs` | ✅ Full clap integration |
+| **Browser Bridge** | `bridge/` | ✅ **WebSocket server** |
+| **SAN to UCI** | `game_manager.rs` | ✅ **Move conversion** |
+| **DOM Integration** | `extension/` | ✅ **Chrome extension** |
+| **Move Execution** | `extension/content.js` | ✅ **Drag-and-drop simulation** |
+| **Auto Reconnect** | `extension/background.js` | ✅ **Exponential backoff** |
+| **Terminal UI** | `ui/tui.rs` | ✅ **Interactive display** |
+| **Connection Status** | `bridge/server.rs` | ✅ **Real-time tracking** |
 
-### 🚧 Planned Implementation
+### 🎯 Recent Improvements
 
-| JavaScript Feature | Target Module | Status |
-|-------------------|---------------|--------|
-| WebSocket Client | `lichess/websocket.rs` | Planned |
-| HTTP API | `lichess/api.rs` | Planned |
-| Event Handling | `lichess/events.rs` | Planned |
-| Game Manager | `game_manager.rs` | Planned |
-| Terminal UI | `ui/tui.rs` | Planned |
-| Auto-rematch | `game_manager.rs` | Planned |
+| Feature | Module | Status |
+|---------|--------|--------|
+| Bidirectional WebSocket | `bridge/server.rs` | ✅ Commands now sent to browser |
+| SAN Move Support | `game_manager.rs` | ✅ Converts Lichess SAN to UCI |
+| TUI Flicker Fix | `ui/tui.rs` | ✅ Cursor repositioning |
+| Custom Engine Path | `main.rs` | ✅ Via `--engine` argument |
+| Connection Reliability | `extension/background.js` | ✅ Robust reconnection |
+| State Change Detection | `extension/content.js` | ✅ Reduced update spam |
 
 ## Testing
 
@@ -354,17 +502,37 @@ Current test coverage:
 - ✅ GameState initialization
 - ✅ Move application
 - ✅ Capture detection
+- ✅ SAN to UCI conversion
 - ⏳ Engine communication (requires Stockfish)
 - ⏳ Timing calculations
 - ⏳ Move selection
 
 ### Integration Testing
+
+#### Test with Browser Extension
 ```bash
-# Run with demo token
-cargo run -- --token "demo" --engine stockfish
+# 1. Build and run Rust app
+cargo run --release -- --auto --engine stockfish
+
+# 2. Load extension in Chrome:
+#    - Open chrome://extensions
+#    - Enable Developer mode
+#    - Click "Load unpacked"
+#    - Select the `extension/` directory
+
+# 3. Navigate to a Lichess game
+#    - The popup should show "Connected" (green)
+#    - Terminal UI should show "🟢 Connected"
+#    - Rust app will auto-play moves when it's your turn
+```
+
+#### Test Engine Configuration
+```bash
+# Use custom engine path
+cargo run -- --engine /path/to/stockfish --auto
 
 # Test with specific mode
-cargo run -- --token "demo" --config-mode 7.5s --panic
+cargo run -- --config-mode 7.5s --panic --auto
 
 # Test configuration loading
 cargo run -- --config config/default.toml
@@ -381,7 +549,15 @@ cargo build
 ### Release Build
 ```bash
 cargo build --release
-./target/release/rustjslich --token "lip_xxx" --auto
+
+# Run with auto mode
+./target/release/rustjslich --auto
+
+# Use custom engine
+./target/release/rustjslich --engine /usr/local/bin/stockfish --auto
+
+# Change bridge port
+./target/release/rustjslich --bridge-port 8765 --auto
 ```
 
 ### Optimizations Enabled
@@ -409,16 +585,23 @@ cargo build --release
 
 ## Security Considerations
 
-1. **Token Storage**: Tokens stored in plain text config files
-   - ⚠️ **Recommendation**: Use environment variables or system keychain
+1. **Token Storage**: Not required for bridge mode
+   - ✅ Extension operates directly on browser session
+   - ✅ No API tokens needed
    
 2. **Engine Execution**: Spawns external Stockfish process
    - ✅ No shell=true usage
    - ✅ Path validation
    
-3. **Network**: Future WebSocket connections to Lichess
-   - 🚧 TLS/HTTPS required
-   - 🚧 Token-based authentication
+3. **Network**: WebSocket server on localhost only
+   - ✅ Binds to 127.0.0.1 (not accessible externally)
+   - ✅ JSON message validation
+   - ⚠️ No authentication (assumes trusted local environment)
+   
+4. **Browser Extension**:
+   - ✅ Only accesses lichess.org domain
+   - ✅ Declared permissions in manifest
+   - ✅ No external data transmission
 
 ## Dependencies
 
@@ -434,10 +617,10 @@ cargo build --release
 - `tracing` 0.1: Logging
 - `crossterm` 0.27: Terminal control
 
-### Network (Planned)
-- `reqwest` 0.11: HTTP client
-- `tokio-tungstenite` 0.21: WebSocket
-- `serde_json` 1.x: JSON parsing
+### Network (Bridge Mode)
+- `tokio-tungstenite` 0.21: WebSocket server
+- `serde_json` 1.x: JSON message serialization
+- `futures-util` 0.3: Stream utilities
 
 ### Chess Engines
 - `vampirc-uci` 0.11: UCI protocol (optional)
@@ -445,34 +628,51 @@ cargo build --release
 
 ## Future Enhancements
 
-### Phase 6: Lichess Integration
-- [ ] WebSocket connection handler
-- [ ] Game event stream
-- [ ] Move sending with ack/lag
-- [ ] Auto-rematch logic
+### Browser Extension Improvements
+- [ ] Firefox support (manifest v2/v3 compatibility)
+- [ ] Safari extension port
+- [ ] Connection status notifications
+- [ ] Move preview arrows
+- [ ] Settings UI in popup
 
-### Phase 7: Game Manager
-- [ ] Central coordinator
-- [ ] Turn processing
-- [ ] State synchronization
-- [ ] Event routing
+### Engine Features
+- [ ] Multi-engine support (run multiple engines)
+- [ ] Native Rust engine (cozy-chess integration)
+- [ ] Cloud engine support
+- [ ] Opening book integration
 
-### Phase 8: Terminal UI
-- [ ] Interactive TUI with ratatui
-- [ ] Real-time board display
-- [ ] Control toggles
-- [ ] Statistics display
-
-### Additional Features
-- [ ] Panic engine (Stockfish skill level 0)
-- [ ] Native Rust engine (cozy-chess)
+### UI Enhancements
+- [ ] Web-based GUI (optional)
 - [ ] System tray integration
 - [ ] Global hotkeys
-- [ ] GUI mode (optional)
-- [ ] Arrow visualization (GUI)
+- [ ] Real-time move analysis display
+- [ ] Game history viewer
+
+### Additional Features
+- [ ] Direct Lichess API mode (alternative to extension)
+- [ ] Training mode (puzzle solving)
+- [ ] Game analysis export
+- [ ] Multiple concurrent games
+- [ ] Tournament participation
 
 ## Conclusion
 
-This Rust port successfully maintains full feature parity with the JavaScript userscript for all core chess automation features. The modular architecture allows for easy extension and maintenance while providing significant performance improvements through Rust's compile-time optimizations and efficient memory model.
+This Rust port successfully achieves **full feature parity** with the JavaScript userscript while operating as a native executable with a browser extension bridge. The architecture combines the best of both worlds:
 
-The remaining work focuses on external integration (Lichess API/WebSocket) and user interface improvements, both of which are independent of the core chess logic that has been fully implemented.
+### Key Achievements ✅
+
+1. **Native Performance**: Rust backend provides fast chess calculations and efficient engine communication
+2. **Browser Integration**: Chrome extension seamlessly integrates with Lichess.org
+3. **Bidirectional Communication**: WebSocket bridge enables real-time game state sync and move execution
+4. **Robust Connectivity**: Automatic reconnection with exponential backoff ensures reliable operation
+5. **Format Compatibility**: Handles both SAN and UCI move formats transparently
+6. **User Experience**: Terminal UI with real-time connection status and configuration controls
+
+### Architecture Highlights
+
+- **Modular Design**: Clean separation between chess logic, engine management, timing, and bridge communication
+- **Type Safety**: Rust's type system prevents common bugs and ensures correctness
+- **Async/Await**: Tokio runtime enables efficient concurrent operations
+- **Extensibility**: Trait-based engine interface allows easy addition of new engines
+
+The browser extension bridge approach eliminates the need for Lichess API tokens and operates directly on the user's authenticated browser session, making setup simpler and more secure than traditional API-based automation.
