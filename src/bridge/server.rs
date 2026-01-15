@@ -1,29 +1,29 @@
 use super::protocol::{BrowserMessage, RustMessage};
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 
 pub struct BridgeServer {
     port: u16,
     message_tx: mpsc::UnboundedSender<BrowserMessage>,
-    command_rx: mpsc::UnboundedReceiver<RustMessage>,
+    command_tx: broadcast::Sender<RustMessage>,
     is_connected: Arc<AtomicBool>,
 }
 
 impl BridgeServer {
     pub fn new(port: u16) -> (Self, BridgeHandle) {
         let (message_tx, message_rx) = mpsc::unbounded_channel();
-        let (command_tx, command_rx) = mpsc::unbounded_channel();
+        let (command_tx, _command_rx) = broadcast::channel(100); // Buffer for 100 commands
         let is_connected = Arc::new(AtomicBool::new(false));
         
         let handle = BridgeHandle {
             message_rx,
-            command_tx,
+            command_tx: command_tx.clone(),
             is_connected: is_connected.clone(),
         };
         
@@ -31,14 +31,14 @@ impl BridgeServer {
             Self {
                 port,
                 message_tx,
-                command_rx,
+                command_tx,
                 is_connected,
             },
             handle,
         )
     }
     
-    pub async fn run(mut self) -> Result<()> {
+    pub async fn run(self) -> Result<()> {
         let addr = format!("127.0.0.1:{}", self.port);
         let listener = TcpListener::bind(&addr).await?;
         
@@ -52,23 +52,7 @@ impl BridgeServer {
                     
                     let message_tx = self.message_tx.clone();
                     let is_connected = self.is_connected.clone();
-                    
-                    // Create a new command channel for this connection
-                    let (command_tx, command_rx) = mpsc::unbounded_channel();
-                    
-                    // Spawn task to forward commands from main command_rx to this connection's command_tx
-                    let mut main_command_rx = std::mem::replace(
-                        &mut self.command_rx,
-                        mpsc::unbounded_channel().1
-                    );
-                    let forward_command_tx = command_tx.clone();
-                    tokio::spawn(async move {
-                        while let Some(cmd) = main_command_rx.recv().await {
-                            if forward_command_tx.send(cmd).is_err() {
-                                break;
-                            }
-                        }
-                    });
+                    let command_rx = self.command_tx.subscribe();
                     
                     tokio::spawn(async move {
                         is_connected.store(true, Ordering::Relaxed);
@@ -90,7 +74,7 @@ impl BridgeServer {
 async fn handle_connection(
     stream: TcpStream,
     message_tx: mpsc::UnboundedSender<BrowserMessage>,
-    mut command_rx: mpsc::UnboundedReceiver<RustMessage>,
+    mut command_rx: broadcast::Receiver<RustMessage>,
 ) -> Result<()> {
     let ws_stream = accept_async(stream).await?;
     info!("WebSocket handshake completed");
@@ -138,17 +122,29 @@ async fn handle_connection(
                 }
             }
             // Send commands to browser
-            Some(command) = command_rx.recv() => {
-                match serde_json::to_string(&command) {
-                    Ok(json) => {
-                        info!("Sending to browser: {}", json);
-                        if let Err(e) = ws_sender.send(Message::Text(json)).await {
-                            error!("Failed to send command: {}", e);
-                            break;
+            command = command_rx.recv() => {
+                match command {
+                    Ok(cmd) => {
+                        match serde_json::to_string(&cmd) {
+                            Ok(json) => {
+                                info!("Sending to browser: {}", json);
+                                if let Err(e) = ws_sender.send(Message::Text(json)).await {
+                                    error!("Failed to send command: {}", e);
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                error!("Failed to serialize command: {}", e);
+                            }
                         }
                     }
-                    Err(e) => {
-                        error!("Failed to serialize command: {}", e);
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        warn!("Command receiver lagged, skipped {} messages", skipped);
+                        // Continue receiving
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        info!("Command channel closed");
+                        break;
                     }
                 }
             }
@@ -163,7 +159,7 @@ async fn handle_connection(
 /// Handle for interacting with the bridge server
 pub struct BridgeHandle {
     message_rx: mpsc::UnboundedReceiver<BrowserMessage>,
-    command_tx: mpsc::UnboundedSender<RustMessage>,
+    command_tx: broadcast::Sender<RustMessage>,
     is_connected: Arc<AtomicBool>,
 }
 
@@ -180,9 +176,10 @@ impl BridgeHandle {
     
     /// Send a command to the browser
     pub fn send_command(&self, command: RustMessage) -> Result<()> {
-        self.command_tx
-            .send(command)
-            .map_err(|e| anyhow!("Failed to send command: {}", e))
+        // broadcast::send returns the number of receivers, or error if no receivers
+        // We don't care if there are no receivers (connection not established yet)
+        let _ = self.command_tx.send(command);
+        Ok(())
     }
     
     /// Send a move command to the browser
