@@ -116,8 +116,8 @@ impl TerminalUI {
     }
     
     pub fn draw(&self) -> Result<()> {
-        // Clear screen and draw UI
-        print!("\x1B[2J\x1B[1;1H");
+        // Move cursor to top-left instead of clearing entire screen
+        print!("\x1B[H");
         
         println!("╔══════════════════════════════════════════════════════════════════════╗");
         println!("║              🦀 RUSTJSLICH - Lichess Automation                      ║");

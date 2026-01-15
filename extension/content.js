@@ -6,6 +6,7 @@ console.log('[Bridge] Content script loaded');
 let isConnected = false;
 let gameId = null;
 let updateInterval = null;
+let lastStateHash = '';
 
 // Check connection status
 chrome.runtime.sendMessage({ type: 'check_connection' }, (response) => {
@@ -170,6 +171,7 @@ function parseAndSendGameState() {
       type: 'new_game',
       game_id: currentGameId
     });
+    lastStateHash = ''; // Reset hash for new game
   }
   gameId = currentGameId;
   
@@ -181,15 +183,18 @@ function parseAndSendGameState() {
   const whiteTurn = isWhiteTurn();
   const gameEnded = isGameEnded();
   
-  // Construct FEN from move list (start position + moves)
-  let fen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
-  // TODO: Apply moves to get current FEN (would need chess library)
-  // For now, we send the move list and let Rust reconstruct the position
+  // Create a hash of the state to detect changes
+  const stateHash = JSON.stringify([moves, whiteTurn, gameEnded]);
   
+  // Skip if state hasn't changed
+  if (stateHash === lastStateHash) return;
+  lastStateHash = stateHash;
+  
+  // Don't send FEN - let Rust reconstruct from moves
   const gameState = {
     type: 'game_state',
     game_id: gameId,
-    fen: fen,
+    fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1', // Starting position
     my_color: orientation,
     is_my_turn: (orientation === 'white' && whiteTurn) || (orientation === 'black' && !whiteTurn),
     white_clock_ms: clocks.white,
@@ -199,6 +204,7 @@ function parseAndSendGameState() {
     result: gameEnded ? getGameResult() : null
   };
   
+  console.log('[Bridge] Sending game state:', gameState);
   chrome.runtime.sendMessage(gameState);
   
   // Check for rematch

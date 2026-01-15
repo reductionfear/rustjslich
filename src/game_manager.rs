@@ -8,6 +8,8 @@ use crate::lichess::LichessClient;
 use crate::move_selector::MoveSelector;
 use crate::timing::TimingEngine;
 use anyhow::Result;
+use chess::{Board, ChessMove};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -397,13 +399,26 @@ impl GameManager {
             if state.move_history.len() != state_msg.moves.len() {
                 state.reset();
                 
-                // Apply all moves
+                // Apply all moves - try both UCI and SAN formats
                 for move_str in &state_msg.moves {
-                    // Parse move (could be SAN or UCI)
-                    // For now, assume they're in a format we can apply
-                    // In production, would need proper parsing
-                    if let Err(e) = state.apply_move(move_str) {
-                        warn!("Failed to apply move {}: {}", move_str, e);
+                    // Try to parse as UCI first
+                    if let Ok(uci_move) = ChessMove::from_str(move_str) {
+                        // Valid UCI move
+                        if state.board.legal(uci_move) {
+                            if let Err(e) = state.apply_move(move_str) {
+                                warn!("Failed to apply UCI move {}: {}", move_str, e);
+                            }
+                            continue;
+                        }
+                    }
+                    
+                    // Try to parse as SAN
+                    if let Some(uci_move) = san_to_uci(&state.board, move_str) {
+                        if let Err(e) = state.apply_move(&uci_move) {
+                            warn!("Failed to apply SAN move {} ({}): {}", move_str, uci_move, e);
+                        }
+                    } else {
+                        warn!("Could not parse move: {}", move_str);
                     }
                 }
             }
@@ -432,4 +447,85 @@ impl GameManager {
         
         Ok(())
     }
+}
+
+/// Convert SAN (Standard Algebraic Notation) to UCI format
+/// E.g., "Nf3" -> "g1f3", "e4" -> "e2e4"
+fn san_to_uci(board: &Board, san: &str) -> Option<String> {
+    // Generate all legal moves
+    let legal_moves = chess::MoveGen::new_legal(board);
+    
+    // Try to match the SAN with a legal move
+    for chess_move in legal_moves {
+        // Convert move to SAN and compare
+        let move_san = move_to_san(board, &chess_move);
+        if move_san == san {
+            return Some(format!("{}", chess_move));
+        }
+    }
+    
+    None
+}
+
+/// Convert a ChessMove to SAN notation
+fn move_to_san(board: &Board, chess_move: &ChessMove) -> String {
+    let piece = board.piece_on(chess_move.get_source());
+    let dest = chess_move.get_dest();
+    let source = chess_move.get_source();
+    
+    // Check if it's a capture
+    let is_capture = board.piece_on(dest).is_some() || 
+                    (piece == Some(chess::Piece::Pawn) && source.get_file() != dest.get_file());
+    
+    // Handle castling
+    if piece == Some(chess::Piece::King) {
+        let diff = dest.to_int() as i8 - source.to_int() as i8;
+        if diff == 2 {
+            return "O-O".to_string();
+        } else if diff == -2 {
+            return "O-O-O".to_string();
+        }
+    }
+    
+    let mut san = String::new();
+    
+    // Add piece letter (except for pawns)
+    if piece != Some(chess::Piece::Pawn) {
+        if let Some(p) = piece {
+            san.push(match p {
+                chess::Piece::Knight => 'N',
+                chess::Piece::Bishop => 'B',
+                chess::Piece::Rook => 'R',
+                chess::Piece::Queen => 'Q',
+                chess::Piece::King => 'K',
+                _ => ' ',
+            });
+        }
+    } else if is_capture {
+        // For pawn captures, add the source file
+        san.push((b'a' + source.get_file().to_index() as u8) as char);
+    }
+    
+    // Add 'x' for captures
+    if is_capture {
+        san.push('x');
+    }
+    
+    // Add destination square
+    san.push((b'a' + dest.get_file().to_index() as u8) as char);
+    san.push((b'1' + dest.get_rank().to_index() as u8) as char);
+    
+    // Handle promotion
+    if let Some(promotion) = chess_move.get_promotion() {
+        san.push('=');
+        san.push(match promotion {
+            chess::Piece::Knight => 'N',
+            chess::Piece::Bishop => 'B',
+            chess::Piece::Rook => 'R',
+            chess::Piece::Queen => 'Q',
+            _ => ' ',
+        });
+    }
+    
+    san
 }
