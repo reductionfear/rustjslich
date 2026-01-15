@@ -5,10 +5,6 @@ use std::path::PathBuf;
 #[command(name = "rustjslich")]
 #[command(about = "Standalone Rust executable for Lichess chess automation", long_about = None)]
 pub struct Args {
-    /// Lichess API token
-    #[arg(long)]
-    pub token: Option<String>,
-    
     /// Engine to use
     #[arg(long, default_value = "stockfish")]
     pub engine: String,
@@ -32,4 +28,12 @@ pub struct Args {
     /// Enable human timing
     #[arg(long)]
     pub human_mode: bool,
+    
+    /// Port for browser bridge WebSocket server
+    #[arg(long, default_value = "9876")]
+    pub bridge_port: u16,
+    
+    /// Enable auto-rematch
+    #[arg(long)]
+    pub auto_rematch: bool,
 }

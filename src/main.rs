@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 use rustjslich::*;
 use std::time::Duration;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -27,14 +27,6 @@ async fn main() -> Result<()> {
     // Merge CLI args into config
     config.merge_with_cli(&args);
     
-    // Validate token
-    if config.lichess_token.is_none() {
-        warn!("⚠️  No Lichess token provided!");
-        warn!("Please provide a token via --token or LICHESS_TOKEN environment variable");
-        warn!("You can get a token from: https://lichess.org/account/oauth/token");
-        return Ok(());
-    }
-    
     info!("Configuration:");
     info!("  Engine: {}", config.selected_engine.as_str());
     info!("  Mode: {}", config.config_mode.as_str());
@@ -42,6 +34,8 @@ async fn main() -> Result<()> {
     info!("  Human mode: {}", config.human_mode);
     info!("  Varied mode: {}", config.varied_mode);
     info!("  Panic mode: {}", config.panic_mode);
+    info!("  Bridge port: {}", config.bridge_port);
+    info!("  Auto-rematch: {}", config.auto_rematch);
     
     // Initialize components
     info!("Initializing chess engine...");
@@ -63,6 +57,20 @@ async fn main() -> Result<()> {
     
     // Initialize game manager
     let game_manager = GameManager::new(engine_manager, config.clone());
+    
+    // Start browser bridge server
+    info!("Starting browser bridge server on port {}...", config.bridge_port);
+    let (bridge_server, bridge_handle) = BridgeServer::new(config.bridge_port);
+    
+    // Set bridge handle in game manager
+    game_manager.set_bridge_handle(bridge_handle).await;
+    
+    // Spawn bridge server task
+    tokio::spawn(async move {
+        if let Err(e) = bridge_server.run().await {
+            error!("Bridge server error: {}", e);
+        }
+    });
     
     info!("✓ All components initialized");
     info!("");
@@ -169,12 +177,27 @@ async fn run_with_ui(game_manager: GameManager, mut config: Config) -> Result<()
                 }
             }
             UICommand::None => {
-                // Check for lichess events
-                let mut client = lichess_client_ref.write().await;
-                if let Some(event) = client.try_recv_event() {
-                    drop(client);
-                    if let Err(e) = game_manager.handle_event(event).await {
-                        warn!("Failed to handle event: {}", e);
+                // Check for bridge messages
+                let mut bridge_handle = game_manager.bridge_handle.write().await;
+                if let Some(ref mut handle) = *bridge_handle {
+                    if let Some(message) = handle.try_recv_message() {
+                        drop(bridge_handle);
+                        if let Err(e) = game_manager.handle_bridge_message(message).await {
+                            warn!("Failed to handle bridge message: {}", e);
+                        }
+                    } else {
+                        drop(bridge_handle);
+                    }
+                } else {
+                    drop(bridge_handle);
+                    
+                    // Fallback to Lichess WebSocket events (legacy mode)
+                    let mut client = lichess_client_ref.write().await;
+                    if let Some(event) = client.try_recv_event() {
+                        drop(client);
+                        if let Err(e) = game_manager.handle_event(event).await {
+                            warn!("Failed to handle event: {}", e);
+                        }
                     }
                 }
             }

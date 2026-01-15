@@ -17,6 +17,6 @@ panic_mode = false
 # Network lag compensation in milliseconds
 vpn_ping_offset = 0
 
-# Lichess API token (get from https://lichess.org/account/oauth/token)
-# You can also set this via LICHESS_TOKEN environment variable
-# lichess_token = "lip_xxxxxxxxxxxxx"
+# Browser bridge settings
+bridge_port = 9876
+auto_rematch = false

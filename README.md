@@ -1,22 +1,23 @@
 # 🦀 rustjslich - Lichess Chess Automation in Rust
 
-A standalone Rust executable that provides chess automation for Lichess.org with **full feature parity** to the original JavaScript userscript.
+A standalone Rust executable that provides chess automation for Lichess.org using a **browser bridge architecture** - no API tokens required!
 
-## ✨ Status: **COMPLETE** - All Phases Implemented
+## ✨ Status: **COMPLETE** - Browser Bridge Mode Implemented
 
-All 8 phases are now complete with production-ready code!
+All features are now complete with a browser extension bridge that connects directly to Lichess games through the DOM.
 
 ## 📋 Features
 
+- ✅ **Browser Bridge Mode**: Connect via browser extension - no Lichess API token needed
 - ✅ **Multiple Chess Engines**: Support for Stockfish and other engines via UCI protocol
 - ✅ **Human-Like Timing**: Sophisticated timing delays that mimic human play patterns
 - ✅ **Varied Move Selection**: Weighted move selection with configurable blunder chances
 - ✅ **Panic Mode**: Ultra-fast, low-skill engine for time pressure situations
 - ✅ **Lag Compensation**: Automatic network lag detection and compensation
 - ✅ **Configurable Presets**: Three timing profiles (7.5s, 15s, 30s) for different play styles
-- ✅ **WebSocket Integration**: Full Lichess.org WebSocket communication
 - ✅ **Terminal UI**: Interactive interface with hotkey controls
 - ✅ **Auto-play**: Automated game playing with event handling
+- ✅ **Auto-rematch**: Automatically accept rematch offers
 
 ## 🚀 Quick Start
 
@@ -25,6 +26,7 @@ All 8 phases are now complete with production-ready code!
 1. **Rust**: Install from [rustup.rs](https://rustup.rs/)
 2. **Stockfish**: Download from [stockfishchess.org](https://stockfishchess.org/download/)
    - Make sure `stockfish` is in your PATH
+3. **Web Browser**: Chrome, Edge, or Firefox
 
 ### Installation
 
@@ -39,59 +41,98 @@ cargo build --release
 # The executable will be at target/release/rustjslich
 ```
 
-### Configuration
+### Browser Extension Setup
 
-1. Get a Lichess API token from [https://lichess.org/account/oauth/token](https://lichess.org/account/oauth/token)
-2. Copy the default config:
-   ```bash
-   cp config/default.toml config.toml
-   ```
-3. Edit `config.toml` and add your token, or set the `LICHESS_TOKEN` environment variable
+1. **Load the Extension**:
+   
+   **For Chrome/Edge**:
+   - Open `chrome://extensions/` (or `edge://extensions/`)
+   - Enable "Developer mode" (top right)
+   - Click "Load unpacked"
+   - Select the `extension/` directory from this repository
+   
+   **For Firefox**:
+   - Open `about:debugging#/runtime/this-firefox`
+   - Click "Load Temporary Add-on"
+   - Select `extension/manifest.json`
+
+2. **Verify Extension**: Click the extension icon - you should see "Disconnected - Start Rust app"
 
 ### Usage
 
 ```bash
-# Run with Terminal UI (interactive)
-./target/release/rustjslich --token "lip_xxxxx"
+# Start the Rust application with auto-play enabled
+./target/release/rustjslich --auto
+
+# Or run with custom settings
+./target/release/rustjslich --auto --config-mode 15s --human-mode
 
 # Run in headless mode (no UI)
-NO_UI=1 ./target/release/rustjslich --token "lip_xxxxx"
+NO_UI=1 ./target/release/rustjslich --auto
 
-# Run with specific options
-./target/release/rustjslich --token "lip_xxxxx" --auto --engine stockfish
-
-# Run in panic mode
-./target/release/rustjslich --panic --config-mode 7.5s
-
-# Enable human timing mode
-./target/release/rustjslich --auto --human-mode
+# Enable auto-rematch
+./target/release/rustjslich --auto --auto-rematch
 ```
+
+3. **Play a Game**:
+   - Navigate to a Lichess game in your browser
+   - The extension will connect automatically
+   - The Rust app will analyze positions and make moves
+   - Watch the terminal for status updates
 
 ## 📦 CLI Options
 
 ```
 Options:
-  --token <TOKEN>              Lichess API token (or set LICHESS_TOKEN env var)
   --engine <ENGINE>            Engine to use [default: stockfish]
   --auto                       Enable auto-play mode
   --config-mode <CONFIG_MODE>  Configuration preset: 7.5s, 15s, or 30s [default: 15s]
   --config <CONFIG>            Path to config file [default: config.toml]
   --panic                      Enable panic mode (fast, low-skill)
   --human-mode                 Enable human-like timing delays
+  --bridge-port <PORT>         WebSocket port for browser bridge [default: 9876]
+  --auto-rematch               Enable automatic rematch acceptance
   -h, --help                   Print help
 ```
 
 ## 🏗️ Architecture
 
-The project is organized into several modules:
+The project uses a **browser bridge architecture**:
 
-- **config**: Configuration management and persistence
-- **chess_logic**: Chess board state and move validation
-- **engine**: Chess engine interface and Stockfish UCI wrapper
-- **timing**: Human-like delay calculation and lag compensation
-- **move_selector**: Varied move selection with blunder logic
-- **lichess**: Lichess API and WebSocket client (planned)
-- **ui**: Terminal UI for controls (planned)
+```
+┌─────────────────────┐         WebSocket          ┌──────────────────────┐
+│                     │      (localhost:9876)       │                      │
+│  Browser Extension  │◄───────────────────────────►│   Rust Application   │
+│   (JavaScript)      │                             │    (rustjslich)      │
+│                     │                             │                      │
+│  - DOM Parser       │     Game State Messages     │  - Chess Engine      │
+│  - Move Executor    │────────────────────────────►│  - Move Analysis     │
+│  - Rematch Handler  │                             │  - Timing Engine     │
+│                     │◄────────────────────────────│  - Move Selection    │
+│                     │      Move Commands          │                      │
+└─────────────────────┘                             └──────────────────────┘
+         │                                                     │
+         │                                                     │
+         ▼                                                     ▼
+┌─────────────────────┐                             ┌──────────────────────┐
+│   Lichess Website   │                             │   Stockfish Engine   │
+│   (lichess.org)     │                             │   (UCI Protocol)     │
+└─────────────────────┘                             └──────────────────────┘
+```
+
+### Components:
+
+- **Browser Extension**: 
+  - Runs on Lichess pages
+  - Parses game state from DOM
+  - Executes moves via simulated clicks
+  - No API token required
+
+- **Rust Application**:
+  - WebSocket server for extension communication
+  - Chess engine integration
+  - Move analysis and selection
+  - Human-like timing simulation
 
 ## 🔧 Configuration Presets
 
@@ -113,7 +154,7 @@ The project is organized into several modules:
 - Longer human delays
 - Suitable for rapid games
 
-## 🎯 Feature Parity Status
+## 🎯 Feature Status
 
 ### ✅ Fully Implemented
 
@@ -127,23 +168,21 @@ The project is organized into several modules:
 - [x] Lag compensation
 - [x] Configuration management
 - [x] CLI argument parsing
-- [x] Lichess WebSocket client
+- [x] **Browser Bridge Architecture**
+- [x] **Browser Extension (Chrome/Edge/Firefox)**
+- [x] **DOM-based game state parsing**
+- [x] **Move execution via browser**
+- [x] **WebSocket communication**
 - [x] Game state synchronization
-- [x] Event handling (moves, acks, game end)
 - [x] Terminal UI with controls
 - [x] Hotkey controls (A/H/V/P/E/M/Q)
 - [x] Auto-play functionality
-- [x] Connection management with auto-reconnect
+- [x] Auto-rematch support
 
-### 📋 Optional Enhancements
+### 📋 Legacy Features (Deprecated)
 
-- [ ] Lichess HTTP API integration (for fetching games)
-- [ ] Auto-rematch functionality
-- [ ] System tray integration
-- [ ] Global hotkeys
-- [ ] Arrow visualization (GUI mode)
-- [ ] Additional engine support (panic mode, native engines)
-- [ ] Statistics tracking across games
+- [~] Lichess WebSocket client (replaced by browser bridge)
+- [~] Lichess API token authentication (no longer needed)
 
 ## Terminal UI Hotkeys
 
@@ -156,6 +195,33 @@ When running with the Terminal UI, use these hotkeys:
 - `E` - Cycle through engines
 - `M` - Cycle through config modes (7.5s/15s/30s)
 - `Q` or `Ctrl+C` - Quit
+
+## 🔌 Browser Bridge Protocol
+
+The extension and Rust app communicate via WebSocket with JSON messages:
+
+### From Browser to Rust:
+```json
+{
+  "type": "game_state",
+  "game_id": "abcd1234",
+  "fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+  "my_color": "white",
+  "is_my_turn": true,
+  "white_clock_ms": 60000,
+  "black_clock_ms": 60000,
+  "moves": ["e2e4", "e7e5"],
+  "game_ended": false
+}
+```
+
+### From Rust to Browser:
+```json
+{
+  "type": "make_move",
+  "uci": "e2e4"
+}
+```
 
 ## 🛠️ Development
 
@@ -180,32 +246,40 @@ cargo clippy
 
 ```
 rustjslich/
-├── Cargo.toml              # Project dependencies
+├── Cargo.toml                  # Project dependencies
 ├── src/
-│   ├── main.rs             # Entry point with UI/headless modes
-│   ├── lib.rs              # Library exports
-│   ├── cli.rs              # CLI argument parsing
-│   ├── config.rs           # Configuration management
-│   ├── chess_logic.rs      # Board state & validation
-│   ├── timing.rs           # Human-like timing engine
-│   ├── move_selector.rs    # Move selection logic
-│   ├── game_manager.rs     # Central game coordinator
+│   ├── main.rs                 # Entry point with UI/headless modes
+│   ├── lib.rs                  # Library exports
+│   ├── cli.rs                  # CLI argument parsing
+│   ├── config.rs               # Configuration management
+│   ├── chess_logic.rs          # Board state & validation
+│   ├── timing.rs               # Human-like timing engine
+│   ├── move_selector.rs        # Move selection logic
+│   ├── game_manager.rs         # Central game coordinator
+│   ├── bridge/
+│   │   ├── mod.rs              # Bridge module
+│   │   ├── protocol.rs         # Message types
+│   │   └── server.rs           # WebSocket server
 │   ├── engine/
-│   │   ├── mod.rs          # Engine trait & manager
-│   │   └── stockfish.rs    # Stockfish UCI wrapper
+│   │   ├── mod.rs              # Engine trait & manager
+│   │   └── stockfish.rs        # Stockfish UCI wrapper
 │   ├── lichess/
-│   │   ├── mod.rs          # Lichess client
-│   │   ├── events.rs       # Event types
-│   │   └── websocket.rs    # WebSocket handler
+│   │   ├── mod.rs              # Lichess client (legacy)
+│   │   ├── events.rs           # Event types
+│   │   └── websocket.rs        # WebSocket handler
 │   └── ui/
-│       ├── mod.rs          # UI module
-│       └── tui.rs          # Terminal UI implementation
+│       ├── mod.rs              # UI module
+│       └── tui.rs              # Terminal UI implementation
+├── extension/
+│   ├── manifest.json           # Extension config
+│   ├── background.js           # Service worker
+│   ├── content.js              # DOM parser/executor
+│   ├── popup.html              # Extension popup
+│   ├── popup.js                # Popup logic
+│   └── icons/                  # Extension icons
 ├── config/
-│   └── default.toml        # Default configuration
-├── SPECIFICATION.md        # Architecture specification
-├── DEVELOPER.md            # Developer guide
-├── IMPLEMENTATION_SUMMARY.md # Completion summary
-└── move.user.js            # Original JavaScript implementation
+│   └── default.toml            # Default configuration
+└── README.md                   # This file
 ```
 
 ## 🤝 Contributing
@@ -219,6 +293,8 @@ This project is provided as-is for educational purposes.
 ## ⚠️ Disclaimer
 
 This tool is for educational purposes only. Using automation on Lichess may violate their Terms of Service. Use at your own risk.
+
+**Browser Bridge Mode**: This implementation uses a browser extension to interact with Lichess through the DOM, similar to how a human would interact with the website. However, automated play is still against Lichess Terms of Service.
 
 ## 🙏 Acknowledgments
 
