@@ -4,57 +4,102 @@
 let ws = null;
 let reconnectTimer = null;
 let isConnected = false;
+let reconnectAttempts = 0;
 const WS_PORT = 9876;
+const MAX_RECONNECT_DELAY = 30000; // 30 seconds max
+const INITIAL_RECONNECT_DELAY = 1000; // 1 second initial
 
 // Connect to local Rust WebSocket server
 function connect() {
   if (ws && ws.readyState === WebSocket.OPEN) {
     return;
   }
-
-  console.log('[Bridge] Connecting to local server...');
   
-  ws = new WebSocket(`ws://127.0.0.1:${WS_PORT}`);
-  
-  ws.onopen = () => {
-    console.log('[Bridge] Connected to Rust application');
-    isConnected = true;
-    
-    // Notify all tabs
-    chrome.tabs.query({ url: 'https://lichess.org/*' }, (tabs) => {
-      tabs.forEach(tab => {
-        chrome.tabs.sendMessage(tab.id, { type: 'bridge_connected' }).catch(() => {});
-      });
-    });
-    
-    // Clear reconnect timer
-    if (reconnectTimer) {
-      clearTimeout(reconnectTimer);
-      reconnectTimer = null;
+  // Close any existing connection
+  if (ws) {
+    try {
+      ws.close();
+    } catch (e) {
+      // Ignore close errors
     }
-  };
-  
-  ws.onclose = () => {
-    console.log('[Bridge] Disconnected from Rust application');
-    isConnected = false;
     ws = null;
-    
-    // Notify all tabs
-    chrome.tabs.query({ url: 'https://lichess.org/*' }, (tabs) => {
-      tabs.forEach(tab => {
-        chrome.tabs.sendMessage(tab.id, { type: 'bridge_disconnected' }).catch(() => {});
-      });
-    });
-    
-    // Try to reconnect after 2 seconds
-    if (!reconnectTimer) {
-      reconnectTimer = setTimeout(connect, 2000);
-    }
-  };
+  }
+
+  console.log('[Bridge] Connecting to local server... (attempt ' + (reconnectAttempts + 1) + ')');
   
-  ws.onerror = (error) => {
-    console.error('[Bridge] WebSocket error:', error);
-  };
+  try {
+    ws = new WebSocket(`ws://127.0.0.1:${WS_PORT}`);
+    
+    ws.onopen = () => {
+      console.log('[Bridge] ✓ Connected to Rust application');
+      isConnected = true;
+      reconnectAttempts = 0; // Reset counter on successful connection
+      
+      // Notify all tabs
+      chrome.tabs.query({ url: 'https://lichess.org/*' }, (tabs) => {
+        tabs.forEach(tab => {
+          chrome.tabs.sendMessage(tab.id, { type: 'bridge_connected' }).catch(() => {});
+        });
+      });
+      
+      // Clear reconnect timer
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+    };
+    
+    ws.onclose = (event) => {
+      const wasConnected = isConnected;
+      console.log('[Bridge] Disconnected from Rust application (code: ' + event.code + ')');
+      isConnected = false;
+      ws = null;
+      
+      // Notify all tabs
+      if (wasConnected) {
+        chrome.tabs.query({ url: 'https://lichess.org/*' }, (tabs) => {
+          tabs.forEach(tab => {
+            chrome.tabs.sendMessage(tab.id, { type: 'bridge_disconnected' }).catch(() => {});
+          });
+        });
+      }
+      
+      // Schedule reconnect with exponential backoff
+      scheduleReconnect();
+    };
+    
+    ws.onerror = (error) => {
+      console.log('[Bridge] Connection error (server may not be running)');
+      // Error will trigger onclose, which will handle reconnection
+    };
+  } catch (e) {
+    console.error('[Bridge] Failed to create WebSocket:', e);
+    scheduleReconnect();
+  }
+}
+
+// Schedule reconnect with exponential backoff
+function scheduleReconnect() {
+  if (reconnectTimer) {
+    return; // Already scheduled
+  }
+  
+  reconnectAttempts++;
+  
+  // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 30s (max)
+  const delay = Math.min(
+    INITIAL_RECONNECT_DELAY * Math.pow(2, reconnectAttempts - 1),
+    MAX_RECONNECT_DELAY
+  );
+  
+  console.log('[Bridge] Will retry connection in ' + (delay / 1000) + 's...');
+  
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connect();
+  }, delay);
+}
+  
   
   ws.onmessage = (event) => {
     try {

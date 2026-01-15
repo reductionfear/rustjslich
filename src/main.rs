@@ -41,16 +41,23 @@ async fn main() -> Result<()> {
     info!("Initializing chess engine...");
     let mut engine_manager = EngineManager::new();
     
+    // Determine engine path from CLI args
+    let engine_path = if args.engine != "stockfish" {
+        args.engine.as_str()
+    } else {
+        "stockfish"
+    };
+    
     // Try to add Stockfish engine
-    match engine::stockfish::StockfishEngine::new("stockfish", None) {
+    match engine::stockfish::StockfishEngine::new(engine_path, None) {
         Ok(engine) => {
-            info!("✓ Stockfish engine initialized");
+            info!("✓ {} engine initialized", engine_path);
             engine_manager.add_engine(Box::new(engine));
         }
         Err(e) => {
-            warn!("⚠️  Failed to initialize Stockfish: {}", e);
-            warn!("Make sure Stockfish is installed and in your PATH");
-            warn!("You can install it from: https://stockfishchess.org/download/");
+            warn!("⚠️  Failed to initialize engine '{}': {}", engine_path, e);
+            warn!("Make sure the engine is installed and in your PATH");
+            warn!("You can install Stockfish from: https://stockfishchess.org/download/");
             return Ok(());
         }
     }
