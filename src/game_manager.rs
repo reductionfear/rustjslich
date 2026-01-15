@@ -1,3 +1,4 @@
+use crate::bridge::{BridgeHandle, BrowserMessage, GameStateMessage};
 use crate::chess_logic::GameState;
 use crate::config::Config;
 use crate::engine::{EngineManager, SearchOptions};
@@ -22,6 +23,7 @@ pub struct GameManager {
     pub is_processing: Arc<AtomicBool>,
     pub pending_move_uci: Arc<RwLock<Option<String>>>,
     pub ws_sender: Arc<RwLock<Option<WebSocketSender>>>,
+    pub bridge_handle: Arc<RwLock<Option<BridgeHandle>>>,
 }
 
 impl GameManager {
@@ -43,6 +45,7 @@ impl GameManager {
             is_processing: Arc::new(AtomicBool::new(false)),
             pending_move_uci: Arc::new(RwLock::new(None)),
             ws_sender: Arc::new(RwLock::new(None)),
+            bridge_handle: Arc::new(RwLock::new(None)),
         }
     }
     
@@ -249,6 +252,37 @@ impl GameManager {
     }
     
     async fn execute_move(&self, uci: String, engine_time: u32) -> Result<()> {
+        let config = self.config.read().await;
+        
+        // Check if we're using bridge mode
+        let bridge_handle = self.bridge_handle.read().await;
+        if bridge_handle.is_some() {
+            // Bridge mode - send move through bridge
+            let handle = bridge_handle.as_ref().unwrap();
+            
+            info!("Sending move via bridge: {}", uci);
+            
+            if let Err(e) = handle.send_move(uci.clone()) {
+                error!("Failed to send move via bridge: {}", e);
+                self.is_processing.store(false, Ordering::Relaxed);
+                return Ok(());
+            }
+            
+            // Apply move to our state
+            let mut state = self.state.write().await;
+            state.last_move_acked = false;
+            if let Err(e) = state.apply_move(&uci) {
+                error!("Failed to apply our own move: {}", e);
+            }
+            
+            *self.pending_move_uci.write().await = Some(uci);
+            self.is_processing.store(false, Ordering::Relaxed);
+            
+            return Ok(());
+        }
+        drop(bridge_handle);
+        
+        // Legacy Lichess WebSocket mode
         let ws_sender = self.ws_sender.read().await;
         if ws_sender.is_none() {
             error!("WebSocket sender not available");
@@ -261,7 +295,6 @@ impl GameManager {
         let client = self.lichess_client.read().await;
         let ack = client.get_ack();
         
-        let config = self.config.read().await;
         let timing = self.timing_engine.read().await;
         
         let lag_claim = if config.panic_mode {
@@ -310,5 +343,93 @@ impl GameManager {
         
         let mut timing = self.timing_engine.write().await;
         timing.reset_stats();
+    }
+    
+    /// Set the bridge handle for browser bridge mode
+    pub async fn set_bridge_handle(&self, handle: BridgeHandle) {
+        *self.bridge_handle.write().await = Some(handle);
+        info!("Bridge handle set - running in browser bridge mode");
+    }
+    
+    /// Handle a message from the browser bridge
+    pub async fn handle_bridge_message(&self, message: BrowserMessage) -> Result<()> {
+        match message {
+            BrowserMessage::GameState(state_msg) => {
+                self.handle_game_state(state_msg).await?;
+            }
+            BrowserMessage::RematchAvailable { game_id } => {
+                info!("Rematch available for game {}", game_id);
+                
+                // Auto-accept if enabled
+                let config = self.config.read().await;
+                if config.auto_rematch {
+                    info!("Auto-accepting rematch");
+                    let bridge_handle = self.bridge_handle.read().await;
+                    if let Some(handle) = bridge_handle.as_ref() {
+                        handle.accept_rematch()?;
+                    }
+                }
+            }
+            BrowserMessage::RematchAccepted { game_id } => {
+                info!("Rematch accepted for game {}", game_id);
+                self.reset_game_state().await;
+            }
+            BrowserMessage::NewGame { game_id } => {
+                info!("New game started: {}", game_id);
+                self.reset_game_state().await;
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Handle game state update from browser
+    async fn handle_game_state(&self, state_msg: GameStateMessage) -> Result<()> {
+        debug!("Game state update: game_id={}, is_my_turn={}, ended={}", 
+               state_msg.game_id, state_msg.is_my_turn, state_msg.game_ended);
+        
+        // Update game state by applying moves
+        let mut state = self.state.write().await;
+        
+        // If we have moves, reconstruct the position
+        if !state_msg.moves.is_empty() {
+            // Reset to starting position if different game or move count mismatch
+            if state.move_history.len() != state_msg.moves.len() {
+                state.reset();
+                
+                // Apply all moves
+                for move_str in &state_msg.moves {
+                    // Parse move (could be SAN or UCI)
+                    // For now, assume they're in a format we can apply
+                    // In production, would need proper parsing
+                    if let Err(e) = state.apply_move(move_str) {
+                        warn!("Failed to apply move {}: {}", move_str, e);
+                    }
+                }
+            }
+        }
+        
+        // Update my color based on orientation
+        state.my_color = Some(if state_msg.my_color.is_white() {
+            chess::Color::White
+        } else {
+            chess::Color::Black
+        });
+        
+        // Update game ended status
+        state.game_ended = state_msg.game_ended;
+        
+        drop(state);
+        
+        // If it's our turn and auto mode is enabled, process the turn
+        if state_msg.is_my_turn && !state_msg.game_ended {
+            let config = self.config.read().await;
+            if config.auto_run {
+                drop(config);
+                self.process_turn().await?;
+            }
+        }
+        
+        Ok(())
     }
 }
