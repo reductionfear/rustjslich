@@ -21,8 +21,9 @@ pub struct Config {
     // Network Settings
     pub vpn_ping_offset: u32,
     
-    // Authentication
-    pub lichess_token: Option<String>,
+    // Browser Bridge Settings
+    pub bridge_port: u16,
+    pub auto_rematch: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -98,7 +99,8 @@ impl Default for Config {
             varied_mode: true,
             panic_mode: false,
             vpn_ping_offset: 0,
-            lichess_token: None,
+            bridge_port: 9876,
+            auto_rematch: false,
         }
     }
 }
@@ -117,10 +119,6 @@ impl Config {
     }
     
     pub fn merge_with_cli(&mut self, cli: &crate::cli::Args) {
-        if let Some(ref token) = cli.token {
-            self.lichess_token = Some(token.clone());
-        }
-        
         if let Some(engine) = Engine::from_str(&cli.engine) {
             self.selected_engine = engine;
         }
@@ -139,6 +137,12 @@ impl Config {
         
         if cli.human_mode {
             self.human_mode = true;
+        }
+        
+        self.bridge_port = cli.bridge_port;
+        
+        if cli.auto_rematch {
+            self.auto_rematch = true;
         }
     }
 }

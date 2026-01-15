@@ -1,3 +1,4 @@
+pub mod bridge;
 pub mod chess_logic;
 pub mod cli;
 pub mod config;
@@ -9,6 +10,7 @@ pub mod timing;
 pub mod ui;
 
 // Re-exports
+pub use bridge::{BridgeHandle, BridgeServer, BrowserMessage, GameStateMessage, RustMessage};
 pub use chess_logic::GameState;
 pub use config::{Config, ConfigMode, Engine};
 pub use engine::{ChessEngine, EngineManager, PVLine, SearchOptions};

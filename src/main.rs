@@ -27,14 +27,6 @@ async fn main() -> Result<()> {
     // Merge CLI args into config
     config.merge_with_cli(&args);
     
-    // Validate token
-    if config.lichess_token.is_none() {
-        warn!("⚠️  No Lichess token provided!");
-        warn!("Please provide a token via --token or LICHESS_TOKEN environment variable");
-        warn!("You can get a token from: https://lichess.org/account/oauth/token");
-        return Ok(());
-    }
-    
     info!("Configuration:");
     info!("  Engine: {}", config.selected_engine.as_str());
     info!("  Mode: {}", config.config_mode.as_str());
@@ -42,6 +34,8 @@ async fn main() -> Result<()> {
     info!("  Human mode: {}", config.human_mode);
     info!("  Varied mode: {}", config.varied_mode);
     info!("  Panic mode: {}", config.panic_mode);
+    info!("  Bridge port: {}", config.bridge_port);
+    info!("  Auto-rematch: {}", config.auto_rematch);
     
     // Initialize components
     info!("Initializing chess engine...");
